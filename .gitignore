@@ -1,0 +1,16 @@
+# Compiled executable
+*.exe
+
+# Config file (contains user-specific setup data)
+*.ini
+
+# Shortcuts
+*.lnk
+
+# Backup and temp directories
+.BACKUP/
+.claude/
+Shortcuts/
+
+# Mock/test files
+Mock*.ahk
