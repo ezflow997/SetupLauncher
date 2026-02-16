@@ -12,6 +12,8 @@ try DllCall("SetThreadDpiAwarenessContext", "Ptr", -3)
 
 global APP_NAME := "Setup Launcher"
 global INI_FILE := A_ScriptDir "\SetupLauncher.ini"
+global LOG_FILE := A_ScriptDir "\SetupLauncher.log"
+global LOG_MAX_SIZE := 512 * 1024  ; 512 KB max before rotation
 global Setups := []
 global MonitorTimers := Map()
 global SetupStatuses := Map()
@@ -39,6 +41,8 @@ global BtnClose := ""
 global BtnCloseAll := ""
 global BtnStopAll := ""
 global BtnPause := ""
+global BtnMoveUp := ""
+global BtnMoveDown := ""
 global BtnHideToggle := ""
 global BtnHelp := ""
 global TxtRefreshLabel := ""
@@ -112,6 +116,35 @@ class StepData {
         this.Key := ""
         this.Mode := "delay"
         this.Value := "500"
+    }
+}
+
+; ============================================================================
+; Logging
+; ============================================================================
+LogInfo(msg) {
+    WriteLog("INFO", msg)
+}
+
+LogError(msg) {
+    WriteLog("ERROR", msg)
+}
+
+WriteLog(level, msg) {
+    global LOG_FILE, LOG_MAX_SIZE
+    try {
+        ; Rotate if over max size
+        if FileExist(LOG_FILE) {
+            size := FileGetSize(LOG_FILE)
+            if (size > LOG_MAX_SIZE) {
+                oldFile := LOG_FILE ".old"
+                if FileExist(oldFile)
+                    FileDelete(oldFile)
+                FileMove(LOG_FILE, oldFile)
+            }
+        }
+        timestamp := FormatTime(, "yyyy-MM-dd HH:mm:ss")
+        FileAppend(timestamp " [" level "] " msg "`n", LOG_FILE)
     }
 }
 
@@ -190,6 +223,7 @@ SaveAllSetups() {
     try {
     if FileExist(INI_FILE)
         FileDelete(INI_FILE)
+    LogInfo("Saving " Setups.Length " setups to INI")
 
     ; Save global settings
     IniWrite(RefreshInterval, INI_FILE, "Global", "RefreshInterval")
@@ -230,6 +264,9 @@ SaveAllSetups() {
             IniWrite(step.Value, INI_FILE, section, "RefreshStep_" sIdx "_Value")
         }
     }
+    } catch as e {
+        LogError("SaveAllSetups failed: " e.Message)
+        throw
     } finally {
         Critical("Off")
     }
@@ -239,7 +276,7 @@ SaveAllSetups() {
 ; Main GUI
 ; ============================================================================
 BuildMainGui() {
-    global MainGui, MainLV, BtnAdd, BtnEdit, BtnDelete, BtnRun, BtnStop, BtnRunAll
+    global MainGui, MainLV, BtnAdd, BtnEdit, BtnDelete, BtnMoveUp, BtnMoveDown, BtnRun, BtnStop, BtnRunAll
     global BtnClose, BtnCloseAll, BtnStopAll, BtnPause, BtnHideToggle, BtnHelp
     global ChkGlobalAutoStart, GlobalAutoStart
     global ChkAutoShowCountdown, AutoShowCountdown, ChkAutoHideCountdown, AutoHideCountdown
@@ -277,6 +314,12 @@ BuildMainGui() {
 
     BtnDelete := MainGui.AddButton("x+8 yp w80 h32", "Delete")
     BtnDelete.OnEvent("Click", OnDeleteSetup)
+
+    BtnMoveUp := MainGui.AddButton("x+8 yp w32 h32", Chr(0x25B2))
+    BtnMoveUp.OnEvent("Click", OnMoveSetupUp)
+
+    BtnMoveDown := MainGui.AddButton("x+4 yp w32 h32", Chr(0x25BC))
+    BtnMoveDown.OnEvent("Click", OnMoveSetupDown)
 
     BtnRun := MainGui.AddButton("x+25 yp w80 h32", "Run")
     BtnRun.OnEvent("Click", OnRunSetup)
@@ -396,7 +439,11 @@ OnMainResize(thisGui, minMax, width, height) {
     BtnEdit.Move(xPos, btnY)
     xPos += 88
     BtnDelete.Move(xPos, btnY)
-    xPos += 105
+    xPos += 88
+    BtnMoveUp.Move(xPos, btnY)
+    xPos += 36
+    BtnMoveDown.Move(xPos, btnY)
+    xPos += 57
     BtnRun.Move(xPos, btnY)
     xPos += 88
     BtnStop.Move(xPos, btnY)
@@ -475,17 +522,45 @@ OnDeleteSetup(*) {
     setup := Setups[row]
     result := MsgBox("Delete setup '" setup.Name "'?`n`nThis cannot be undone.", APP_NAME, "YesNo Icon!")
     if (result = "Yes") {
+        LogInfo("Deleting setup #" row ": " setup.Name)
+        ; Show hidden window before deleting so it's not stranded off-screen
+        ShowSetupWindow(row)
+        UnregisterKeepAliveThumb("setup_" row)
         StopSetup(row)
         Setups.RemoveAt(row)
-        newStatuses := Map()
-        for idx, s in Setups {
-            oldIdx := (idx >= row) ? idx + 1 : idx
-            newStatuses[idx] := SetupStatuses.Has(oldIdx) ? SetupStatuses[oldIdx] : "Stopped"
-        }
-        SetupStatuses := newStatuses
+        ; Remap ALL index-keyed global maps to account for shifted indices
+        RemapGlobalIndices(row)
         SaveAllSetups()
         RefreshMainLV()
     }
+}
+
+OnMoveSetupUp(*) {
+    row := MainLV.GetNext(0)
+    if (row <= 1)
+        return
+    LogInfo("Moving setup #" row " (" Setups[row].Name ") up")
+    temp := Setups[row - 1]
+    Setups[row - 1] := Setups[row]
+    Setups[row] := temp
+    SwapGlobalIndices(row, row - 1)
+    SaveAllSetups()
+    RefreshMainLV()
+    MainLV.Modify(row - 1, "Select Focus")
+}
+
+OnMoveSetupDown(*) {
+    row := MainLV.GetNext(0)
+    if (row = 0 || row >= Setups.Length)
+        return
+    LogInfo("Moving setup #" row " (" Setups[row].Name ") down")
+    temp := Setups[row + 1]
+    Setups[row + 1] := Setups[row]
+    Setups[row] := temp
+    SwapGlobalIndices(row, row + 1)
+    SaveAllSetups()
+    RefreshMainLV()
+    MainLV.Modify(row + 1, "Select Focus")
 }
 
 OnRunSetup(*) {
@@ -938,8 +1013,10 @@ OnSaveSetup(ctrl, *) {
         setup.LastTitle := Setups[EditingIndex].LastTitle
 
     if (EditingIndex > 0) {
+        LogInfo("Updating setup #" EditingIndex ": " setup.Name)
         Setups[EditingIndex] := setup
     } else {
+        LogInfo("Adding new setup: " setup.Name)
         Setups.Push(setup)
         SetupStatuses[Setups.Length] := "Stopped"
     }
@@ -1236,6 +1313,7 @@ RunSetup(idx) {
 
     if (setup.ShortcutPath = "" || !FileExist(setup.ShortcutPath)) {
         SetupRunning := false
+        LogError("Shortcut not found for '" setup.Name "': " setup.ShortcutPath)
         MsgBox("Shortcut not found for '" setup.Name "':`n" setup.ShortcutPath, APP_NAME, "IconX")
         return
     }
@@ -1277,11 +1355,13 @@ RunSetup(idx) {
 
     ; Network availability check with retry
     if (setup.CheckNet && setup.NetAddress != "" && setup.NetPort != "") {
+        LogInfo("Waiting for network: " setup.NetAddress ":" setup.NetPort " (timeout " setup.NetTimeout "s)")
         SetupStatuses[idx] := "Waiting for network..."
         RefreshMainLV()
         available := CheckNetworkAvailable(setup.NetAddress, setup.NetPort, setup.NetTimeout)
         if (!available) {
             retryDelay := setup.NetRetryDelay > 0 ? setup.NetRetryDelay : 5
+            LogInfo("Network unavailable for '" setup.Name "', retrying in " retryDelay "s")
             SetupStatuses[idx] := "Net retry in " retryDelay "s..."
             RefreshMainLV()
             Sleep(retryDelay * 1000)
@@ -1290,6 +1370,7 @@ RunSetup(idx) {
         }
     }
 
+    LogInfo("Launching setup #" idx ": " setup.Name)
     SetupStatuses[idx] := "Launching..."
     RefreshMainLV()
 
@@ -1306,6 +1387,7 @@ RunSetup(idx) {
     try {
         Run(setup.ShortcutPath)
     } catch as e {
+        LogError("Failed to launch '" setup.Name "': " e.Message)
         SetupStatuses[idx] := "Error"
         RefreshMainLV()
         SetupRunning := false
@@ -1320,21 +1402,12 @@ RunSetup(idx) {
         Loop {
             if (A_TickCount > timeout) {
                 ; Close any partially opened window and retry silently
-                ; Try both WindowTitle and LastTitle (for batch scripts that launch applets with different titles)
-                titlesToClose := []
-                if (setup.WindowTitle != "")
-                    titlesToClose.Push(setup.WindowTitle)
-                if (setup.LastTitle != "" && setup.LastTitle != setup.WindowTitle)
-                    titlesToClose.Push(setup.LastTitle)
-
-                for _, closeTitle in titlesToClose {
-                    try {
-                        for candidateHwnd in WinGetList(closeTitle) {
-                            if !existingHwnds.Has(candidateHwnd) {
-                                WinClose("ahk_id " candidateHwnd)
-                                if !WinWaitClose("ahk_id " candidateHwnd,, 2)
-                                    WinKill("ahk_id " candidateHwnd)
-                            }
+                try {
+                    for candidateHwnd in WinGetList(setup.WindowTitle) {
+                        if !existingHwnds.Has(candidateHwnd) {
+                            WinClose("ahk_id " candidateHwnd)
+                            if !WinWaitClose("ahk_id " candidateHwnd,, 2)
+                                WinKill("ahk_id " candidateHwnd)
                         }
                     }
                 }
@@ -1345,17 +1418,11 @@ RunSetup(idx) {
                 return
             }
             Sleep(200)
-            ; Check both WindowTitle and LastTitle (batch scripts may close quickly, leaving applet with different title)
-            titlesToDetect := [setup.WindowTitle]
-            if (setup.LastTitle != "" && setup.LastTitle != setup.WindowTitle)
-                titlesToDetect.Push(setup.LastTitle)
-            for _, detectTitle in titlesToDetect {
-                try {
-                    for candidateHwnd in WinGetList(detectTitle) {
-                        if !existingHwnds.Has(candidateHwnd) {
-                            hwnd := candidateHwnd
-                            break 3
-                        }
+            try {
+                for candidateHwnd in WinGetList(setup.WindowTitle) {
+                    if !existingHwnds.Has(candidateHwnd) {
+                        hwnd := candidateHwnd
+                        break 2
                     }
                 }
             }
@@ -1486,6 +1553,8 @@ StopSetup(idx) {
     global SetupStatuses, MonitorTimers, MonitoredTitles, MonitoredHwnds
     global HiddenPositions, SetupHidden
 
+    LogInfo("Stopping setup #" idx (idx <= Setups.Length ? " (" Setups[idx].Name ")" : ""))
+
     if MonitorTimers.Has(idx) {
         SetTimer(MonitorTimers[idx], 0)
         MonitorTimers.Delete(idx)
@@ -1501,6 +1570,124 @@ StopSetup(idx) {
         MonitoredHwnds.Delete(idx)
 
     SetupStatuses[idx] := "Stopped"
+}
+
+; After Setups.RemoveAt(row), all index-keyed maps have stale keys for indices > row.
+; This function rebuilds every map so keys match the new Setups array positions.
+RemapGlobalIndices(removedRow) {
+    global SetupStatuses, MonitorTimers, MonitoredTitles, MonitoredHwnds
+    global HiddenPositions, SetupHidden, DwmKeepAliveThumbs, Setups
+
+    RemapIndexMap(&SetupStatuses, removedRow, Setups.Length, "Stopped")
+
+    ; MonitorTimers needs special handling: stop old timers and re-bind with new indices
+    newTimers := Map()
+    for idx, s in Setups {
+        oldIdx := (idx >= removedRow) ? idx + 1 : idx
+        if MonitorTimers.Has(oldIdx) {
+            SetTimer(MonitorTimers[oldIdx], 0)
+            MonitorTimers.Delete(oldIdx)
+            ; Re-create timer bound to the correct new index
+            monitorFn := MonitorCallback.Bind(idx)
+            newTimers[idx] := monitorFn
+            SetTimer(monitorFn, s.CheckInterval > 0 ? s.CheckInterval : 5000)
+        }
+    }
+    MonitorTimers := newTimers
+
+    RemapIndexMap(&MonitoredTitles, removedRow, Setups.Length)
+    RemapIndexMap(&MonitoredHwnds, removedRow, Setups.Length)
+    RemapIndexMap(&HiddenPositions, removedRow, Setups.Length)
+    RemapIndexMap(&SetupHidden, removedRow, Setups.Length)
+
+    ; DwmKeepAliveThumbs uses string keys like "setup_1", remap those too
+    newThumbs := Map()
+    for idx, s in Setups {
+        oldIdx := (idx >= removedRow) ? idx + 1 : idx
+        oldKey := "setup_" oldIdx
+        newKey := "setup_" idx
+        if DwmKeepAliveThumbs.Has(oldKey)
+            newThumbs[newKey] := DwmKeepAliveThumbs[oldKey]
+    }
+    DwmKeepAliveThumbs := newThumbs
+}
+
+; Generic helper: rebuild an index-keyed Map after an element was removed at removedRow.
+RemapIndexMap(&theMap, removedRow, newLength, defaultVal := "") {
+    newMap := Map()
+    Loop newLength {
+        idx := A_Index
+        oldIdx := (idx >= removedRow) ? idx + 1 : idx
+        if theMap.Has(oldIdx)
+            newMap[idx] := theMap[oldIdx]
+        else if (defaultVal != "")
+            newMap[idx] := defaultVal
+    }
+    theMap := newMap
+}
+
+; Swap all index-keyed global map entries for two indices (used by move up/down).
+SwapGlobalIndices(idxA, idxB) {
+    global SetupStatuses, MonitorTimers, MonitoredTitles, MonitoredHwnds
+    global HiddenPositions, SetupHidden, DwmKeepAliveThumbs, Setups
+
+    SwapMapEntries(&SetupStatuses, idxA, idxB)
+    SwapMapEntries(&MonitoredTitles, idxA, idxB)
+    SwapMapEntries(&MonitoredHwnds, idxA, idxB)
+    SwapMapEntries(&HiddenPositions, idxA, idxB)
+    SwapMapEntries(&SetupHidden, idxA, idxB)
+
+    ; MonitorTimers: stop old timers, rebind with swapped indices, restart
+    hasA := MonitorTimers.Has(idxA), hasB := MonitorTimers.Has(idxB)
+    if (hasA) {
+        SetTimer(MonitorTimers[idxA], 0)
+        MonitorTimers.Delete(idxA)
+    }
+    if (hasB) {
+        SetTimer(MonitorTimers[idxB], 0)
+        MonitorTimers.Delete(idxB)
+    }
+    if (hasA) {
+        fn := MonitorCallback.Bind(idxB)
+        MonitorTimers[idxB] := fn
+        SetTimer(fn, Setups[idxB].CheckInterval > 0 ? Setups[idxB].CheckInterval : 5000)
+    }
+    if (hasB) {
+        fn := MonitorCallback.Bind(idxA)
+        MonitorTimers[idxA] := fn
+        SetTimer(fn, Setups[idxA].CheckInterval > 0 ? Setups[idxA].CheckInterval : 5000)
+    }
+
+    ; DwmKeepAliveThumbs uses string keys
+    keyA := "setup_" idxA, keyB := "setup_" idxB
+    hA := DwmKeepAliveThumbs.Has(keyA), hB := DwmKeepAliveThumbs.Has(keyB)
+    if (hA && hB) {
+        temp := DwmKeepAliveThumbs[keyA]
+        DwmKeepAliveThumbs[keyA] := DwmKeepAliveThumbs[keyB]
+        DwmKeepAliveThumbs[keyB] := temp
+    } else if (hA) {
+        DwmKeepAliveThumbs[keyB] := DwmKeepAliveThumbs[keyA]
+        DwmKeepAliveThumbs.Delete(keyA)
+    } else if (hB) {
+        DwmKeepAliveThumbs[keyA] := DwmKeepAliveThumbs[keyB]
+        DwmKeepAliveThumbs.Delete(keyB)
+    }
+}
+
+; Swap two entries in an index-keyed Map, handling cases where one or both may not exist.
+SwapMapEntries(&theMap, a, b) {
+    hasA := theMap.Has(a), hasB := theMap.Has(b)
+    if (hasA && hasB) {
+        temp := theMap[a]
+        theMap[a] := theMap[b]
+        theMap[b] := temp
+    } else if (hasA) {
+        theMap[b] := theMap[a]
+        theMap.Delete(a)
+    } else if (hasB) {
+        theMap[a] := theMap[b]
+        theMap.Delete(b)
+    }
 }
 
 StartMonitor(idx) {
@@ -1546,6 +1733,7 @@ MonitorCallback(idx) {
 
     if (windowGone) {
         ; Window disappeared - relaunch
+        LogInfo("Window gone for setup #" idx " (" Setups[idx].Name "), relaunching")
         SetupStatuses[idx] := "Relaunching..."
         RefreshMainLV()
         if MonitorTimers.Has(idx)
@@ -1568,6 +1756,7 @@ MonitorCallback(idx) {
             currentTitle := WinGetTitle("ahk_id " MonitoredHwnds[idx])
             if (currentTitle != expectedTitle) {
                 ; Title changed — window is on the wrong screen, recover
+                LogInfo("Title mismatch for setup #" idx " (" Setups[idx].Name "), recovering: expected '" expectedTitle "' got '" currentTitle "'")
                 SetupStatuses[idx] := "Recovering..."
                 RefreshMainLV()
                 if MonitorTimers.Has(idx)
@@ -2115,6 +2304,7 @@ BuildTrayMenu() {
     tray.Add("Run All Auto-Start", OnTrayRunAutoStart)
     tray.Add()
     tray.Add("Help", OnShowHelp)
+    tray.Add("View Log", OnTrayViewLog)
     tray.Add()
     tray.Add("Exit", OnTrayExit)
     tray.Default := "Show " APP_NAME
@@ -2128,12 +2318,20 @@ OnTrayRunAutoStart(*) {
     OnRunAllAutoStart()
 }
 
+OnTrayViewLog(*) {
+    if FileExist(LOG_FILE)
+        Run('notepad.exe "' LOG_FILE '"')
+    else
+        MsgBox("No log file found yet.", APP_NAME, "Icon!")
+}
+
 OnTrayExit(*) {
     CleanupAndExit()
 }
 
 CleanupAndExit() {
     global DwmKeepAliveThumbs, DwmKeepAliveGui
+    LogInfo("=== " APP_NAME " exiting ===")
     ; Prevent all timer interrupts during shutdown to avoid corrupt saves
     Critical("On")
     try BlockInput("Default")
@@ -2170,9 +2368,11 @@ CleanupAndExit() {
 ; Startup
 ; ============================================================================
 
+LogInfo("=== " APP_NAME " starting ===")
 try BlockInput("Default")
     try BlockInput("MouseMoveOff")  ; Clear any leftover BlockInput from previous crash
 LoadAllSetups()
+LogInfo("Loaded " Setups.Length " setups")
 BuildMainGui()
 BuildTrayMenu()
 RefreshMainLV()
