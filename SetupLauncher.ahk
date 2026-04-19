@@ -96,6 +96,8 @@ class SetupData {
         this.Name := ""
         this.ShortcutPath := ""
         this.WindowTitle := ""
+        this.MonitorTitle := ""
+        this.CloseTitles := ""
         this.AutoStart := 0
         this.KeepActive := 0
         this.CheckInterval := 5000
@@ -105,7 +107,6 @@ class SetupData {
         this.NetTimeout := 30
         this.NetRetryDelay := 5
         this.HideWindow := 0
-        this.CloseBatchTitle := ""
         this.LastTitle := ""
         this.Steps := []
         this.RefreshSteps := []
@@ -177,6 +178,8 @@ LoadAllSetups() {
         setup.Name := name
         setup.ShortcutPath := IniRead(INI_FILE, section, "ShortcutPath", "")
         setup.WindowTitle := IniRead(INI_FILE, section, "WindowTitle", "")
+        setup.MonitorTitle := IniRead(INI_FILE, section, "MonitorTitle", "")
+        setup.CloseTitles := IniRead(INI_FILE, section, "CloseTitles", "")
         setup.AutoStart := Integer(IniRead(INI_FILE, section, "AutoStart", "0"))
         setup.KeepActive := Integer(IniRead(INI_FILE, section, "KeepActive", "0"))
         setup.CheckInterval := Integer(IniRead(INI_FILE, section, "CheckInterval", "5000"))
@@ -186,7 +189,6 @@ LoadAllSetups() {
         setup.NetTimeout := Integer(IniRead(INI_FILE, section, "NetTimeout", "30"))
         setup.NetRetryDelay := Integer(IniRead(INI_FILE, section, "NetRetryDelay", "5"))
         setup.HideWindow := Integer(IniRead(INI_FILE, section, "HideWindow", "0"))
-        setup.CloseBatchTitle := IniRead(INI_FILE, section, "CloseBatchTitle", "")
         setup.LastTitle := IniRead(INI_FILE, section, "LastTitle", "")
 
         ; Navigation steps
@@ -239,6 +241,8 @@ SaveAllSetups() {
         IniWrite(setup.Name, INI_FILE, section, "Name")
         IniWrite(setup.ShortcutPath, INI_FILE, section, "ShortcutPath")
         IniWrite(setup.WindowTitle, INI_FILE, section, "WindowTitle")
+        IniWrite(setup.MonitorTitle, INI_FILE, section, "MonitorTitle")
+        IniWrite(setup.CloseTitles, INI_FILE, section, "CloseTitles")
         IniWrite(setup.AutoStart, INI_FILE, section, "AutoStart")
         IniWrite(setup.KeepActive, INI_FILE, section, "KeepActive")
         IniWrite(setup.CheckInterval, INI_FILE, section, "CheckInterval")
@@ -248,7 +252,6 @@ SaveAllSetups() {
         IniWrite(setup.NetTimeout, INI_FILE, section, "NetTimeout")
         IniWrite(setup.NetRetryDelay, INI_FILE, section, "NetRetryDelay")
         IniWrite(setup.HideWindow, INI_FILE, section, "HideWindow")
-        IniWrite(setup.CloseBatchTitle, INI_FILE, section, "CloseBatchTitle")
         IniWrite(setup.LastTitle, INI_FILE, section, "LastTitle")
 
         ; Navigation steps
@@ -611,6 +614,7 @@ OnCloseAllSetups(*) {
             hwndsToClose[idx] := MonitoredHwnds[idx]
         ; Show hidden windows first so WinClose can reach them
         ShowSetupWindow(idx)
+        CloseAdditionalWindows(idx)
         StopSetup(idx)
         SetupStatuses[idx] := "Closed"
     }
@@ -637,6 +641,30 @@ CloseSetupWindow(idx) {
         WinClose("ahk_id " hwnd)
         if !WinWaitClose("ahk_id " hwnd,, 2)
             WinKill("ahk_id " hwnd)
+    }
+    CloseAdditionalWindows(idx)
+}
+
+CloseAdditionalWindows(idx) {
+    global Setups
+    if (idx < 1 || idx > Setups.Length)
+        return
+    setup := Setups[idx]
+    if (setup.CloseTitles = "")
+        return
+    
+    LogInfo("Closing additional windows for setup #" idx ": " setup.CloseTitles)
+    for title in StrSplit(setup.CloseTitles, "|") {
+        title := Trim(title)
+        if (title = "")
+            continue
+        try {
+            if WinExist(title) {
+                WinClose(title)
+                if !WinWaitClose(title,, 2)
+                    WinKill(title)
+            }
+        }
     }
 }
 
@@ -803,6 +831,20 @@ OpenSetupEditor(editIndex) {
     btnDetect := EditorGui.AddButton("x+5 yp w75 h24", "Detect")
     btnDetect.OnEvent("Click", OnDetectTitle)
 
+    EditorGui.AddText("xm+15 y+10 w90", "Monitor Title:")
+    EditorGui.AddEdit("x+5 yp-3 w270 vEdMonitorTitle", editIndex > 0 ? setup.MonitorTitle : "")
+    btnDetectMonitor := EditorGui.AddButton("x+5 yp w75 h24", "Detect")
+    btnDetectMonitor.OnEvent("Click", OnDetectMonitorTitle)
+    EditorGui.SetFont("s9", "Segoe UI")
+    EditorGui.AddText("xm+110 y+2 w350 cGray", "Optional: Specific title for monitoring if different")
+    EditorGui.SetFont("s10 Norm", "Segoe UI")
+
+    EditorGui.AddText("xm+15 y+10 w90", "Close Titles:")
+    EditorGui.AddEdit("x+5 yp-3 w355 vEdCloseTitles", editIndex > 0 ? setup.CloseTitles : "")
+    EditorGui.SetFont("s9", "Segoe UI")
+    EditorGui.AddText("xm+110 y+2 w350 cGray", "Additional titles to close (separated by |)")
+    EditorGui.SetFont("s10 Norm", "Segoe UI")
+
     ; -- Options --
     EditorGui.AddText("xm+15 y+14 w450 h1 BackgroundDDDDDD")
 
@@ -821,9 +863,6 @@ OpenSetupEditor(editIndex) {
     edInterval := EditorGui.AddEdit("x+5 yp-3 w65 vEdInterval Number", editIndex > 0 ? String(setup.CheckInterval) : "5000")
     if (editIndex = 0 || !setup.KeepActive)
         edInterval.Enabled := false
-
-    EditorGui.AddText("xm+15 y+8 w140", "Auto-Close Window (Title):")
-    EditorGui.AddEdit("x+5 yp-3 w305 vEdCloseBatchTitle", editIndex > 0 ? setup.CloseBatchTitle : "")
 
     ; -- Network Check --
     EditorGui.AddText("xm+15 y+14 w450 h1 BackgroundDDDDDD")
@@ -967,6 +1006,20 @@ OnDetectTitle(ctrl, *) {
     }
 }
 
+OnDetectMonitorTitle(ctrl, *) {
+    MsgBox("The application will wait 5 seconds.`nActivate the window you want to use for Monitoring within that time.", APP_NAME, "Icon!")
+
+    Sleep(5000)
+    
+    title := WinGetTitle("A")
+    if (title != "" && title != APP_NAME && title != "Edit Setup" && title != "Add Setup") {
+        EditorGui["EdMonitorTitle"].Value := title
+        MsgBox("Detected Monitor Title: " title, APP_NAME, "Iconi")
+    } else {
+        MsgBox("Could not detect a valid window title. Please type it manually.", APP_NAME, "Icon!")
+    }
+}
+
 OnKeepActiveToggle(ctrl, *) {
     EditorGui["EdInterval"].Enabled := ctrl.Value
 }
@@ -999,6 +1052,8 @@ OnSaveSetup(ctrl, *) {
     setup.Name := name
     setup.ShortcutPath := path
     setup.WindowTitle := title
+    setup.MonitorTitle := EditorGui["EdMonitorTitle"].Value
+    setup.CloseTitles := EditorGui["EdCloseTitles"].Value
     setup.AutoStart := EditorGui["ChkAutoStart"].Value
     setup.KeepActive := EditorGui["ChkKeepActive"].Value
     interval := EditorGui["EdInterval"].Value
@@ -1011,7 +1066,6 @@ OnSaveSetup(ctrl, *) {
     netRetry := EditorGui["EdNetRetryDelay"].Value
     setup.NetRetryDelay := (netRetry != "" && IsNumber(netRetry) && Integer(netRetry) > 0) ? Integer(netRetry) : 5
     setup.HideWindow := EditorGui["ChkHideWindow"].Value
-    setup.CloseBatchTitle := EditorGui["EdCloseBatchTitle"].Value
     setup.Steps := TempSteps
     setup.RefreshSteps := TempRefreshSteps
 
@@ -1332,9 +1386,11 @@ RunSetup(idx) {
         claimedHwnds[otherHwnd] := true
 
     titlesToTry := []
+    if (setup.MonitorTitle != "")
+        titlesToTry.Push(setup.MonitorTitle)
     if (setup.LastTitle != "")
         titlesToTry.Push(setup.LastTitle)
-    if (setup.WindowTitle != "" && setup.WindowTitle != setup.LastTitle)
+    if (setup.WindowTitle != "" && setup.WindowTitle != setup.LastTitle && setup.WindowTitle != setup.MonitorTitle)
         titlesToTry.Push(setup.WindowTitle)
 
     for _, searchTitle in titlesToTry {
@@ -1343,8 +1399,8 @@ RunSetup(idx) {
                 if !claimedHwnds.Has(candidateHwnd) {
                     MonitoredHwnds[idx] := candidateHwnd
                     MonitoredTitles[idx] := WinGetTitle("ahk_id " candidateHwnd)
-                    if (setup.KeepActive || setup.CloseBatchTitle != "") {
-                        SetupStatuses[idx] := (setup.KeepActive) ? "Monitoring" : "Running"
+                    if (setup.KeepActive) {
+                        SetupStatuses[idx] := "Monitoring"
                         StartMonitor(idx)
                     } else {
                         SetupStatuses[idx] := "Running"
@@ -1390,15 +1446,6 @@ RunSetup(idx) {
         }
     }
 
-    ; Snapshot existing BATCH windows BEFORE launching
-    existingBatchHwnds := Map()
-    if (setup.CloseBatchTitle != "") {
-        try {
-            for bHwnd in WinGetList(setup.CloseBatchTitle)
-                existingBatchHwnds[bHwnd] := true
-        }
-    }
-
     ; Launch the shortcut
     try {
         Run(setup.ShortcutPath)
@@ -1411,41 +1458,12 @@ RunSetup(idx) {
         return
     }
 
-    ; Try to identify the NEW batch window launched by this shortcut
-    batchHwnd := 0
-    if (setup.CloseBatchTitle != "") {
-        timeoutBatch := A_TickCount + 5000
-        Loop {
-            if (A_TickCount > timeoutBatch)
-                break
-            Sleep(100)
-            try {
-                for bHwnd in WinGetList(setup.CloseBatchTitle) {
-                    if !existingBatchHwnds.Has(bHwnd) {
-                        batchHwnd := bHwnd
-                        break 2
-                    }
-                }
-            }
-        }
-    }
-
     ; Wait for a NEW window (one that wasn't in the snapshot)
     hwnd := 0
     if (setup.WindowTitle != "") {
         timeout := A_TickCount + 30000
         Loop {
             if (A_TickCount > timeout) {
-                ; Failure: Close the batch window we just opened
-                if (batchHwnd) {
-                    LogInfo("Closing failed attempt's batch window for '" setup.Name "': ahk_id " batchHwnd)
-                    try {
-                        WinClose("ahk_id " batchHwnd)
-                        if !WinWaitClose("ahk_id " batchHwnd,, 2)
-                            WinKill("ahk_id " batchHwnd)
-                    }
-                }
-
                 ; Close any partially opened window and retry silently
                 try {
                     for candidateHwnd in WinGetList(setup.WindowTitle) {
@@ -1496,16 +1514,6 @@ RunSetup(idx) {
                 Sleep(delay)
             } else if (step.Mode = "window") {
                 if !WinWait(step.Value,, 15) {
-                    ; Failure in navigation steps: Close our specific batch window
-                    if (batchHwnd) {
-                        LogInfo("Closing batch window after nav failure for '" setup.Name "': ahk_id " batchHwnd)
-                        try {
-                            WinClose("ahk_id " batchHwnd)
-                            if !WinWaitClose("ahk_id " batchHwnd,, 2)
-                                WinKill("ahk_id " batchHwnd)
-                        }
-                    }
-
                     ; Close the window and retry silently
                     try BlockInput("Default")
     try BlockInput("MouseMoveOff")
@@ -1585,8 +1593,8 @@ RunSetup(idx) {
     SaveAllSetups()
 
     ; Update status
-    if (setup.KeepActive || setup.CloseBatchTitle != "") {
-        SetupStatuses[idx] := (setup.KeepActive) ? "Monitoring" : "Running"
+    if (setup.KeepActive) {
+        SetupStatuses[idx] := "Monitoring"
         StartMonitor(idx)
     } else {
         SetupStatuses[idx] := "Running"
@@ -1770,20 +1778,6 @@ MonitorCallback(idx) {
         return
     if (idx < 1 || idx > Setups.Length)
         return
-
-    setup := Setups[idx]
-
-    ; Auto-close batch window if it appears
-    if (setup.CloseBatchTitle != "") {
-        if WinExist(setup.CloseBatchTitle) {
-            LogInfo("Closing background window for '" setup.Name "': " setup.CloseBatchTitle)
-            try {
-                WinClose(setup.CloseBatchTitle)
-                if !WinWaitClose(setup.CloseBatchTitle,, 1)
-                    WinKill(setup.CloseBatchTitle)
-            }
-        }
-    }
 
     ; Skip title check and recovery for hidden windows — they're intentionally off-screen
     isHidden := SetupHidden.Has(idx) && SetupHidden[idx]
@@ -2123,6 +2117,18 @@ ExecuteRefreshCycle() {
                 continue
 
             isHidden := SetupHidden.Has(idx) && SetupHidden[idx]
+
+            ; Check if title matches MonitorTitle (if set) before proceeding with refresh
+            if (setup.MonitorTitle != "") {
+                try {
+                    currentTitle := WinGetTitle("ahk_id " rHwnd)
+                    if (currentTitle != setup.MonitorTitle) {
+                        LogInfo("Title mismatch for setup #" idx ": expected '" setup.MonitorTitle "' got '" currentTitle "'. Skipping refresh and triggering recovery.")
+                        failedSetups.Push(idx)
+                        continue
+                    }
+                }
+            }
 
             ; Only activate visible windows — hidden windows get ControlSend only
             if (!isHidden) {
