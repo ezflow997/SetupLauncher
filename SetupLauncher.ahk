@@ -105,6 +105,7 @@ class SetupData {
         this.NetTimeout := 30
         this.NetRetryDelay := 5
         this.HideWindow := 0
+        this.CloseBatchTitle := ""
         this.LastTitle := ""
         this.Steps := []
         this.RefreshSteps := []
@@ -185,6 +186,7 @@ LoadAllSetups() {
         setup.NetTimeout := Integer(IniRead(INI_FILE, section, "NetTimeout", "30"))
         setup.NetRetryDelay := Integer(IniRead(INI_FILE, section, "NetRetryDelay", "5"))
         setup.HideWindow := Integer(IniRead(INI_FILE, section, "HideWindow", "0"))
+        setup.CloseBatchTitle := IniRead(INI_FILE, section, "CloseBatchTitle", "")
         setup.LastTitle := IniRead(INI_FILE, section, "LastTitle", "")
 
         ; Navigation steps
@@ -246,6 +248,7 @@ SaveAllSetups() {
         IniWrite(setup.NetTimeout, INI_FILE, section, "NetTimeout")
         IniWrite(setup.NetRetryDelay, INI_FILE, section, "NetRetryDelay")
         IniWrite(setup.HideWindow, INI_FILE, section, "HideWindow")
+        IniWrite(setup.CloseBatchTitle, INI_FILE, section, "CloseBatchTitle")
         IniWrite(setup.LastTitle, INI_FILE, section, "LastTitle")
 
         ; Navigation steps
@@ -819,6 +822,9 @@ OpenSetupEditor(editIndex) {
     if (editIndex = 0 || !setup.KeepActive)
         edInterval.Enabled := false
 
+    EditorGui.AddText("xm+15 y+8 w140", "Auto-Close Window (Title):")
+    EditorGui.AddEdit("x+5 yp-3 w305 vEdCloseBatchTitle", editIndex > 0 ? setup.CloseBatchTitle : "")
+
     ; -- Network Check --
     EditorGui.AddText("xm+15 y+14 w450 h1 BackgroundDDDDDD")
 
@@ -1005,6 +1011,7 @@ OnSaveSetup(ctrl, *) {
     netRetry := EditorGui["EdNetRetryDelay"].Value
     setup.NetRetryDelay := (netRetry != "" && IsNumber(netRetry) && Integer(netRetry) > 0) ? Integer(netRetry) : 5
     setup.HideWindow := EditorGui["ChkHideWindow"].Value
+    setup.CloseBatchTitle := EditorGui["EdCloseBatchTitle"].Value
     setup.Steps := TempSteps
     setup.RefreshSteps := TempRefreshSteps
 
@@ -1336,8 +1343,8 @@ RunSetup(idx) {
                 if !claimedHwnds.Has(candidateHwnd) {
                     MonitoredHwnds[idx] := candidateHwnd
                     MonitoredTitles[idx] := WinGetTitle("ahk_id " candidateHwnd)
-                    if (setup.KeepActive) {
-                        SetupStatuses[idx] := "Monitoring"
+                    if (setup.KeepActive || setup.CloseBatchTitle != "") {
+                        SetupStatuses[idx] := (setup.KeepActive) ? "Monitoring" : "Running"
                         StartMonitor(idx)
                     } else {
                         SetupStatuses[idx] := "Running"
@@ -1383,6 +1390,15 @@ RunSetup(idx) {
         }
     }
 
+    ; Snapshot existing BATCH windows BEFORE launching
+    existingBatchHwnds := Map()
+    if (setup.CloseBatchTitle != "") {
+        try {
+            for bHwnd in WinGetList(setup.CloseBatchTitle)
+                existingBatchHwnds[bHwnd] := true
+        }
+    }
+
     ; Launch the shortcut
     try {
         Run(setup.ShortcutPath)
@@ -1395,12 +1411,41 @@ RunSetup(idx) {
         return
     }
 
+    ; Try to identify the NEW batch window launched by this shortcut
+    batchHwnd := 0
+    if (setup.CloseBatchTitle != "") {
+        timeoutBatch := A_TickCount + 5000
+        Loop {
+            if (A_TickCount > timeoutBatch)
+                break
+            Sleep(100)
+            try {
+                for bHwnd in WinGetList(setup.CloseBatchTitle) {
+                    if !existingBatchHwnds.Has(bHwnd) {
+                        batchHwnd := bHwnd
+                        break 2
+                    }
+                }
+            }
+        }
+    }
+
     ; Wait for a NEW window (one that wasn't in the snapshot)
     hwnd := 0
     if (setup.WindowTitle != "") {
         timeout := A_TickCount + 30000
         Loop {
             if (A_TickCount > timeout) {
+                ; Failure: Close the batch window we just opened
+                if (batchHwnd) {
+                    LogInfo("Closing failed attempt's batch window for '" setup.Name "': ahk_id " batchHwnd)
+                    try {
+                        WinClose("ahk_id " batchHwnd)
+                        if !WinWaitClose("ahk_id " batchHwnd,, 2)
+                            WinKill("ahk_id " batchHwnd)
+                    }
+                }
+
                 ; Close any partially opened window and retry silently
                 try {
                     for candidateHwnd in WinGetList(setup.WindowTitle) {
@@ -1451,6 +1496,16 @@ RunSetup(idx) {
                 Sleep(delay)
             } else if (step.Mode = "window") {
                 if !WinWait(step.Value,, 15) {
+                    ; Failure in navigation steps: Close our specific batch window
+                    if (batchHwnd) {
+                        LogInfo("Closing batch window after nav failure for '" setup.Name "': ahk_id " batchHwnd)
+                        try {
+                            WinClose("ahk_id " batchHwnd)
+                            if !WinWaitClose("ahk_id " batchHwnd,, 2)
+                                WinKill("ahk_id " batchHwnd)
+                        }
+                    }
+
                     ; Close the window and retry silently
                     try BlockInput("Default")
     try BlockInput("MouseMoveOff")
@@ -1530,8 +1585,8 @@ RunSetup(idx) {
     SaveAllSetups()
 
     ; Update status
-    if (setup.KeepActive) {
-        SetupStatuses[idx] := "Monitoring"
+    if (setup.KeepActive || setup.CloseBatchTitle != "") {
+        SetupStatuses[idx] := (setup.KeepActive) ? "Monitoring" : "Running"
         StartMonitor(idx)
     } else {
         SetupStatuses[idx] := "Running"
@@ -1715,6 +1770,20 @@ MonitorCallback(idx) {
         return
     if (idx < 1 || idx > Setups.Length)
         return
+
+    setup := Setups[idx]
+
+    ; Auto-close batch window if it appears
+    if (setup.CloseBatchTitle != "") {
+        if WinExist(setup.CloseBatchTitle) {
+            LogInfo("Closing background window for '" setup.Name "': " setup.CloseBatchTitle)
+            try {
+                WinClose(setup.CloseBatchTitle)
+                if !WinWaitClose(setup.CloseBatchTitle,, 1)
+                    WinKill(setup.CloseBatchTitle)
+            }
+        }
+    }
 
     ; Skip title check and recovery for hidden windows — they're intentionally off-screen
     isHidden := SetupHidden.Has(idx) && SetupHidden[idx]
